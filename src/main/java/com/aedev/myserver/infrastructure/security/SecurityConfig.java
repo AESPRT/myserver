@@ -29,7 +29,8 @@ public class SecurityConfig {
                                 "/api/v1/audio/**",
                                 "/audio/**",
                                 "/api/v1/sms/**",
-                                "/api/v1/rag/**"
+                                "/api/v1/rag/**",
+                                "/actuator/health"
                         ).permitAll()
                         .anyRequest().authenticated()
                 )
