@@ -1,4 +1,8 @@
 services:
+
+  # ==========================================
+  # PostgreSQL
+  # ==========================================
   postgres:
     image: pgvector/pgvector:pg16
     container_name: myserver-postgres
@@ -13,14 +17,23 @@ services:
       - myserver:/var/lib/postgresql/data
 
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
     networks:
       - myserver-network
 
+
+  # ==========================================
+  # Spring Boot API
+  # ==========================================
   springboot:
     build:
       context: .
@@ -30,77 +43,142 @@ services:
     restart: unless-stopped
 
     environment:
+
+      # ========================================
+      # Spring Boot
+      # ========================================
       SERVER_PORT: 8086
 
+      # ========================================
       # PostgreSQL
+      # ========================================
       SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL}
       SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME}
       SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD}
 
+      # ========================================
       # Gmail SMTP
+      # ========================================
       EMAIL_USER: ${EMAIL_USER}
       EMAIL_PASS: ${EMAIL_PASS}
 
+      # ========================================
       # PayMongo
+      # ========================================
       PAYMONGO_SECRET_KEY: ${PAYMONGO_SECRET_KEY}
       PAYMONGO_WEBHOOK_SECRET: ${PAYMONGO_WEBHOOK_SECRET}
       PAYMONGO_LIVE_MODE: ${PAYMONGO_LIVE_MODE}
       PAYMONGO_API_URL: ${PAYMONGO_API_URL}
 
+      # ========================================
       # Frontend
+      # ========================================
       FRONT_END_URL: ${FRONT_END_URL}
 
+      # ========================================
       # JWT
+      # ========================================
       JWT_SECRET: ${JWT_SECRET}
 
+      # ========================================
       # ElevenLabs
+      # ========================================
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
       ELEVENLABS_VOICE_ID: ${ELEVENLABS_VOICE_ID}
       ELEVENLABS_MODEL_ID: ${ELEVENLABS_MODEL_ID}
       ELEVENLABS_API_URL: ${ELEVENLABS_API_URL}
 
+      # ========================================
       # Audio Storage
+      # ========================================
       AUDIO_STORAGE_PATH: /app/uploads/audio
       AUDIO_PUBLIC_BASE_URL: ${AUDIO_PUBLIC_BASE_URL}
 
+      # ========================================
       # App API Key
+      # ========================================
       APP_API_KEY: ${APP_API_KEY}
 
-      # Semaphore
+      # ========================================
+      # Semaphore SMS
+      # ========================================
       SEMAPHORE_API_KEY: ${SEMAPHORE_API_KEY}
       SEMAPHORE_API_URL: ${SEMAPHORE_API_URL}
       SEMAPHORE_SENDER_NAME: ${SEMAPHORE_SENDER_NAME}
 
+      # ========================================
       # Cohere
+      # ========================================
       COHERE_API_KEY: ${COHERE_API_KEY}
+
 
     volumes:
       - myserver-audio:/app/uploads/audio
+
 
     depends_on:
       postgres:
         condition: service_healthy
 
+
+    # ========================================
+    # Spring Boot Health Check
+    # ========================================
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "http://localhost:8086/actuator/health"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+
     networks:
       - myserver-network
 
+
+  # ==========================================
+  # Cloudflare Tunnel
+  # ==========================================
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: myserver-cloudflared
     restart: unless-stopped
 
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${CLOUDFLARE_TUNNEL_TOKEN}
 
     depends_on:
-      - springboot
+      springboot:
+        condition: service_healthy
 
     networks:
       - myserver-network
 
+
+# ==========================================
+# Persistent Volumes
+# ==========================================
 volumes:
   myserver:
-  myserver-audio:
+    name: myserver_postgres_data
 
+  myserver-audio:
+    name: myserver_audio_data
+
+
+# ==========================================
+# Network
+# ==========================================
 networks:
   myserver-network:
     driver: bridge

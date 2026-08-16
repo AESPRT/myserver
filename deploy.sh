@@ -8,15 +8,6 @@ echo "=========================================="
 echo " 🚀 Deploying ${APP_NAME}"
 echo "=========================================="
 
-# ==========================================
-# Check current directory
-# ==========================================
-
-if [ ! -f "compose.yaml" ] && [ ! -f "compose.yml" ]; then
-    echo "❌ compose.yaml / compose.yml not found."
-    echo "Please run this script from the project directory."
-    exit 1
-fi
 
 # ==========================================
 # Environment check
@@ -34,6 +25,7 @@ fi
 
 echo "✅ .env found."
 
+
 # ==========================================
 # Git check
 # ==========================================
@@ -46,8 +38,9 @@ echo "=========================================="
 if ! git diff --quiet || ! git diff --cached --quiet; then
     echo "❌ Local Git changes detected."
     echo ""
-    echo "Commit/stash your changes before deploying."
     git status --short
+    echo ""
+    echo "Commit or stash your changes before deploying."
     exit 1
 fi
 
@@ -55,6 +48,7 @@ git pull --ff-only
 
 echo ""
 echo "✅ Latest code pulled."
+
 
 # ==========================================
 # Docker check
@@ -70,6 +64,7 @@ fi
 
 echo "✅ Docker is available."
 
+
 # ==========================================
 # Docker Compose check
 # ==========================================
@@ -84,8 +79,9 @@ fi
 
 echo "✅ Docker Compose is available."
 
+
 # ==========================================
-# Validate Compose configuration
+# Validate Compose
 # ==========================================
 
 echo ""
@@ -97,8 +93,9 @@ docker compose config > /dev/null
 
 echo "✅ Docker Compose configuration is valid."
 
+
 # ==========================================
-# Build and deploy
+# Build and start
 # ==========================================
 
 echo ""
@@ -109,78 +106,80 @@ echo "=========================================="
 docker compose up -d --build
 
 echo ""
-echo "✅ Containers started."
+echo "✅ Docker Compose started."
+
 
 # ==========================================
-# Wait for PostgreSQL
+# Wait for services
 # ==========================================
 
 echo ""
 echo "=========================================="
-echo " 🗄️ Waiting for PostgreSQL"
+echo " ⏳ Waiting for services"
 echo "=========================================="
 
-POSTGRES_READY=false
+MAX_ATTEMPTS=30
+ATTEMPT=1
 
-for i in {1..30}; do
-    if docker compose exec -T postgres \
-        pg_isready \
-        -U "${POSTGRES_USER}" \
-        -d "${POSTGRES_DB}" > /dev/null 2>&1; then
+while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
 
-        POSTGRES_READY=true
-        echo "✅ PostgreSQL is ready."
+    API_STATUS=$(docker inspect \
+        --format='{{.State.Health.Status}}' \
+        myserver-api 2>/dev/null || echo "missing")
+
+    POSTGRES_STATUS=$(docker inspect \
+        --format='{{.State.Health.Status}}' \
+        myserver-postgres 2>/dev/null || echo "missing")
+
+    echo "Attempt ${ATTEMPT}/${MAX_ATTEMPTS}"
+    echo "  PostgreSQL: ${POSTGRES_STATUS}"
+    echo "  Spring Boot: ${API_STATUS}"
+
+    if [ "$POSTGRES_STATUS" = "healthy" ] && \
+       [ "$API_STATUS" = "healthy" ]; then
+
+        echo ""
+        echo "✅ PostgreSQL is healthy."
+        echo "✅ Spring Boot is healthy."
         break
     fi
 
-    echo "⏳ PostgreSQL is not ready yet... ($i/30)"
-    sleep 2
+    if [ "$API_STATUS" = "unhealthy" ]; then
+        echo ""
+        echo "❌ Spring Boot became unhealthy."
+        echo ""
+        docker compose logs --tail=100 springboot
+        exit 1
+    fi
+
+    if [ "$POSTGRES_STATUS" = "unhealthy" ]; then
+        echo ""
+        echo "❌ PostgreSQL became unhealthy."
+        echo ""
+        docker compose logs --tail=100 postgres
+        exit 1
+    fi
+
+    sleep 3
+
+    ATTEMPT=$((ATTEMPT + 1))
 done
 
-if [ "$POSTGRES_READY" = false ]; then
-    echo "❌ PostgreSQL did not become ready."
+
+if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     echo ""
-    echo "PostgreSQL logs:"
-    docker compose logs --tail=50 postgres
-    exit 1
-fi
-
-# ==========================================
-# Wait for Spring Boot
-# ==========================================
-
-echo ""
-echo "=========================================="
-echo " ❤️ Waiting for Spring Boot"
-echo "=========================================="
-
-SPRINGBOOT_READY=false
-
-for i in {1..30}; do
-
-    if docker compose exec -T springboot \
-        sh -c 'echo > /dev/tcp/127.0.0.1/8086' \
-        > /dev/null 2>&1; then
-
-        SPRINGBOOT_READY=true
-        echo "✅ Spring Boot is listening on port 8086."
-        break
-    fi
-
-    echo "⏳ Spring Boot is not ready yet... ($i/30)"
-    sleep 2
-done
-
-if [ "$SPRINGBOOT_READY" = false ]; then
-    echo "❌ Spring Boot did not become ready."
+    echo "❌ Services did not become healthy in time."
+    echo ""
+    docker compose ps
     echo ""
     echo "Spring Boot logs:"
     docker compose logs --tail=100 springboot
     exit 1
 fi
 
+
 # ==========================================
-# Container Status
+# Container status
 # ==========================================
 
 echo ""
@@ -190,8 +189,9 @@ echo "=========================================="
 
 docker compose ps
 
+
 # ==========================================
-# Spring Boot Logs
+# Spring Boot logs
 # ==========================================
 
 echo ""
@@ -201,19 +201,21 @@ echo "=========================================="
 
 docker compose logs --tail=30 springboot
 
+
 # ==========================================
 # Cloudflare Tunnel
 # ==========================================
 
 echo ""
 echo "=========================================="
-echo " ☁️ Cloudflare Tunnel Status"
+echo " ☁️ Cloudflare Tunnel"
 echo "=========================================="
 
 docker compose logs --tail=20 cloudflared
 
+
 # ==========================================
-# Deployment completed
+# Complete
 # ==========================================
 
 echo ""
@@ -223,11 +225,11 @@ echo "=========================================="
 
 echo ""
 echo "API:"
-echo "  https://YOUR_API_DOMAIN"
+echo "  https://aeserver.aesprt.com"
 
 echo ""
 echo "Webhook:"
-echo "  /paymongo-webhook"
+echo "  https://aeserver.aesprt.com/paymongo-webhook"
 
 echo ""
 echo "Spring Boot logs:"
