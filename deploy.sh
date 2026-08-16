@@ -8,6 +8,24 @@ echo "=========================================="
 echo " 🚀 Deploying ${APP_NAME}"
 echo "=========================================="
 
+# ==========================================
+# Update source code
+# ==========================================
+
+echo ""
+echo "=========================================="
+echo " 📥 Pulling latest code from Git"
+echo "=========================================="
+
+git pull --ff-only
+
+echo ""
+echo "✅ Latest code pulled."
+
+# ==========================================
+# Docker check
+# ==========================================
+
 echo ""
 echo "🐳 Checking Docker..."
 
@@ -17,6 +35,10 @@ if ! docker info > /dev/null 2>&1; then
 fi
 
 echo "✅ Docker is available."
+
+# ==========================================
+# Docker Compose check
+# ==========================================
 
 echo ""
 echo "🔧 Checking Docker Compose..."
@@ -28,6 +50,10 @@ fi
 
 echo "✅ Docker Compose is available."
 
+# ==========================================
+# Environment check
+# ==========================================
+
 echo ""
 echo "🔐 Checking environment configuration..."
 
@@ -38,86 +64,19 @@ fi
 
 echo "✅ .env found."
 
-echo ""
-echo "🔨 Checking Gradle..."
-
-if [ ! -f "./gradlew" ]; then
-    echo "❌ Gradle wrapper not found."
-    exit 1
-fi
-
-chmod +x ./gradlew
-
-echo "✅ Gradle wrapper found."
-
 # ==========================================
-# Build application
+# Build and deploy
 # ==========================================
 
 echo ""
 echo "=========================================="
-echo " 🏗️ Building Spring Boot application"
+echo " 🏗️ Building and starting containers"
 echo "=========================================="
 
-./gradlew clean build -x test
+docker compose up -d --build
 
 echo ""
-echo "✅ Spring Boot build completed."
-
-# ==========================================
-# Build Docker image
-# ==========================================
-
-echo ""
-echo "=========================================="
-echo " 🐳 Building Docker image"
-echo "=========================================="
-
-docker compose build springboot
-
-echo ""
-echo "✅ Docker image built."
-
-# ==========================================
-# Start / recreate API
-# ==========================================
-
-echo ""
-echo "=========================================="
-echo " 🚀 Starting Spring Boot"
-echo "=========================================="
-
-docker compose up -d --no-deps springboot
-
-echo ""
-echo "✅ Spring Boot container started."
-
-# ==========================================
-# Ensure supporting services are running
-# ==========================================
-
-echo ""
-echo "=========================================="
-echo " 🗄️ Checking PostgreSQL"
-echo "=========================================="
-
-docker compose up -d postgres
-
-echo ""
-echo "=========================================="
-echo " ☁️ Checking Cloudflare Tunnel"
-echo "=========================================="
-
-docker compose up -d cloudflared
-
-# ==========================================
-# Wait
-# ==========================================
-
-echo ""
-echo "⏳ Waiting for application..."
-
-sleep 8
+echo "✅ Containers started."
 
 # ==========================================
 # Status
@@ -131,7 +90,16 @@ echo "=========================================="
 docker compose ps
 
 # ==========================================
-# Health check
+# Wait for application
+# ==========================================
+
+echo ""
+echo "⏳ Waiting for Spring Boot..."
+
+sleep 10
+
+# ==========================================
+# API health check
 # ==========================================
 
 echo ""
@@ -143,7 +111,7 @@ if curl -fsS http://localhost:8086/ > /dev/null 2>&1; then
     echo "✅ API is responding on port 8086."
 else
     echo "⚠️ API root endpoint did not return a successful response."
-    echo "This may be normal if '/' is not mapped."
+    echo "Check the Spring Boot logs."
 fi
 
 # ==========================================
@@ -159,23 +127,30 @@ docker compose logs --tail=30 springboot
 
 echo ""
 echo "=========================================="
+echo " ☁️ Cloudflare Tunnel Status"
+echo "=========================================="
+
+docker compose logs --tail=20 cloudflared
+
+echo ""
+echo "=========================================="
 echo " ✅ Deployment completed"
 echo "=========================================="
 
 echo ""
 echo "API:"
-echo "  http://localhost:8086"
+echo "  https://YOUR_API_DOMAIN"
 
 echo ""
 echo "Webhook:"
 echo "  /paymongo-webhook"
 
 echo ""
-echo "Logs:"
+echo "Spring Boot logs:"
 echo "  docker compose logs -f springboot"
 
 echo ""
-echo "Cloudflare:"
+echo "Cloudflare logs:"
 echo "  docker compose logs -f cloudflared"
 
 echo ""
