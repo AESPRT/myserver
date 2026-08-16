@@ -9,13 +9,47 @@ echo " 🚀 Deploying ${APP_NAME}"
 echo "=========================================="
 
 # ==========================================
-# Update source code
+# Check current directory
+# ==========================================
+
+if [ ! -f "compose.yaml" ] && [ ! -f "compose.yml" ]; then
+    echo "❌ compose.yaml / compose.yml not found."
+    echo "Please run this script from the project directory."
+    exit 1
+fi
+
+# ==========================================
+# Environment check
 # ==========================================
 
 echo ""
 echo "=========================================="
-echo " 📥 Pulling latest code from Git"
+echo " 🔐 Checking environment configuration"
 echo "=========================================="
+
+if [ ! -f ".env" ]; then
+    echo "❌ .env file not found."
+    exit 1
+fi
+
+echo "✅ .env found."
+
+# ==========================================
+# Git check
+# ==========================================
+
+echo ""
+echo "=========================================="
+echo " 📥 Updating source code"
+echo "=========================================="
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "❌ Local Git changes detected."
+    echo ""
+    echo "Commit/stash your changes before deploying."
+    git status --short
+    exit 1
+fi
 
 git pull --ff-only
 
@@ -51,18 +85,17 @@ fi
 echo "✅ Docker Compose is available."
 
 # ==========================================
-# Environment check
+# Validate Compose configuration
 # ==========================================
 
 echo ""
-echo "🔐 Checking environment configuration..."
+echo "=========================================="
+echo " 🔍 Validating Docker Compose"
+echo "=========================================="
 
-if [ ! -f ".env" ]; then
-    echo "❌ .env file not found."
-    exit 1
-fi
+docker compose config > /dev/null
 
-echo "✅ .env found."
+echo "✅ Docker Compose configuration is valid."
 
 # ==========================================
 # Build and deploy
@@ -79,7 +112,75 @@ echo ""
 echo "✅ Containers started."
 
 # ==========================================
-# Status
+# Wait for PostgreSQL
+# ==========================================
+
+echo ""
+echo "=========================================="
+echo " 🗄️ Waiting for PostgreSQL"
+echo "=========================================="
+
+POSTGRES_READY=false
+
+for i in {1..30}; do
+    if docker compose exec -T postgres \
+        pg_isready \
+        -U "${POSTGRES_USER}" \
+        -d "${POSTGRES_DB}" > /dev/null 2>&1; then
+
+        POSTGRES_READY=true
+        echo "✅ PostgreSQL is ready."
+        break
+    fi
+
+    echo "⏳ PostgreSQL is not ready yet... ($i/30)"
+    sleep 2
+done
+
+if [ "$POSTGRES_READY" = false ]; then
+    echo "❌ PostgreSQL did not become ready."
+    echo ""
+    echo "PostgreSQL logs:"
+    docker compose logs --tail=50 postgres
+    exit 1
+fi
+
+# ==========================================
+# Wait for Spring Boot
+# ==========================================
+
+echo ""
+echo "=========================================="
+echo " ❤️ Waiting for Spring Boot"
+echo "=========================================="
+
+SPRINGBOOT_READY=false
+
+for i in {1..30}; do
+
+    if docker compose exec -T springboot \
+        sh -c 'echo > /dev/tcp/127.0.0.1/8086' \
+        > /dev/null 2>&1; then
+
+        SPRINGBOOT_READY=true
+        echo "✅ Spring Boot is listening on port 8086."
+        break
+    fi
+
+    echo "⏳ Spring Boot is not ready yet... ($i/30)"
+    sleep 2
+done
+
+if [ "$SPRINGBOOT_READY" = false ]; then
+    echo "❌ Spring Boot did not become ready."
+    echo ""
+    echo "Spring Boot logs:"
+    docker compose logs --tail=100 springboot
+    exit 1
+fi
+
+# ==========================================
+# Container Status
 # ==========================================
 
 echo ""
@@ -90,32 +191,7 @@ echo "=========================================="
 docker compose ps
 
 # ==========================================
-# Wait for application
-# ==========================================
-
-echo ""
-echo "⏳ Waiting for Spring Boot..."
-
-sleep 10
-
-# ==========================================
-# API health check
-# ==========================================
-
-echo ""
-echo "=========================================="
-echo " ❤️ API Check"
-echo "=========================================="
-
-if curl -fsS http://localhost:8086/ > /dev/null 2>&1; then
-    echo "✅ API is responding on port 8086."
-else
-    echo "⚠️ API root endpoint did not return a successful response."
-    echo "Check the Spring Boot logs."
-fi
-
-# ==========================================
-# Logs
+# Spring Boot Logs
 # ==========================================
 
 echo ""
@@ -125,6 +201,10 @@ echo "=========================================="
 
 docker compose logs --tail=30 springboot
 
+# ==========================================
+# Cloudflare Tunnel
+# ==========================================
+
 echo ""
 echo "=========================================="
 echo " ☁️ Cloudflare Tunnel Status"
@@ -132,9 +212,13 @@ echo "=========================================="
 
 docker compose logs --tail=20 cloudflared
 
+# ==========================================
+# Deployment completed
+# ==========================================
+
 echo ""
 echo "=========================================="
-echo " ✅ Deployment completed"
+echo " ✅ Deployment completed successfully"
 echo "=========================================="
 
 echo ""
@@ -148,6 +232,10 @@ echo "  /paymongo-webhook"
 echo ""
 echo "Spring Boot logs:"
 echo "  docker compose logs -f springboot"
+
+echo ""
+echo "PostgreSQL logs:"
+echo "  docker compose logs -f postgres"
 
 echo ""
 echo "Cloudflare logs:"
