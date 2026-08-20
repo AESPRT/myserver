@@ -3,6 +3,7 @@ package com.aedev.myserver.application.dto.audio;
 import com.aedev.myserver.domain.entity.StoryAudio;
 
 import java.time.Instant;
+import java.util.List;
 
 public record StoryAudioResponse(
         Long id,
@@ -14,8 +15,10 @@ public record StoryAudioResponse(
         String modelId,
         Integer characterCount,
         Long fileSize,
-        Instant createdAt
+        Instant createdAt,
+        List<WordTiming> words
 ) {
+
     public static StoryAudioResponse from(StoryAudio audio) {
         return new StoryAudioResponse(
                 audio.getId(),
@@ -27,7 +30,10 @@ public record StoryAudioResponse(
                 audio.getModelId(),
                 audio.getCharacterCount(),
                 audio.getFileSize(),
-                audio.getCreatedAt()
+                audio.getCreatedAt(),
+                audio.getWordTimings() != null
+                        ? audio.getWordTimings()
+                        : List.of()
         );
     }
 }

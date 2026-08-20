@@ -8,6 +8,7 @@ import com.aedev.myserver.domain.repository.StoryAudioRepository;
 import com.aedev.myserver.infrastructure.audio.AudioFileStorageService;
 import com.aedev.myserver.infrastructure.tts.ElevenLabsClient;
 import com.aedev.myserver.infrastructure.tts.ElevenLabsProperties;
+import com.aedev.myserver.infrastructure.tts.TtsSynthesisResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -66,34 +67,89 @@ public class StoryAudioService {
     }
 
     private StoryAudioResponse doGenerateOrGetAudio(GenerateStoryAudioRequest request) {
-        String contentHash = sha256(request.transcript());
+        String contentHash =
+                sha256(request.transcript());
 
-        Optional<StoryAudio> existing = storyAudioRepository.findByMediaId(request.mediaId());
+        Optional<StoryAudio> existing =
+                storyAudioRepository.findByMediaId(
+                        request.mediaId()
+                );
 
         if (existing.isPresent()) {
             StoryAudio audio = existing.get();
 
-            if (audio.getContentHash().equals(contentHash)) {
-                if (!storageService.exists(audio.getFilePath())) {
-                    throw new AudioFileMissingException(request.mediaId());
+            if (
+                    audio.getContentHash()
+                            .equals(contentHash)
+            ) {
+                if (
+                        !storageService.exists(
+                                audio.getFilePath()
+                        )
+                ) {
+                    throw new AudioFileMissingException(
+                            request.mediaId()
+                    );
                 }
-                log.info("Story audio already exists: mediaId={}, audioId={}", request.mediaId(), audio.getId());
-                return StoryAudioResponse.from(audio);
+
+                boolean hasWordTimings =
+                        audio.getWordTimings() != null &&
+                                !audio.getWordTimings().isEmpty();
+
+                if (hasWordTimings) {
+
+                    log.info(
+                            "Story audio cache hit: mediaId={}, audioId={}, words={}",
+                            request.mediaId(),
+                            audio.getId(),
+                            audio.getWordTimings().size()
+                    );
+
+                    return StoryAudioResponse.from(audio);
+                }
+
+                /*
+                 * Old cached audio generated before timestamp
+                 * support was introduced.
+                 */
+                log.info(
+                        "Cached audio missing timestamps. Regenerating: mediaId={}, audioId={}",
+                        request.mediaId(),
+                        audio.getId()
+                );
+
+                return regenerate(
+                        audio,
+                        request,
+                        contentHash
+                );
             }
 
-            log.info("Transcript changed for mediaId={}, regenerating audio", request.mediaId());
-            return regenerate(audio, request, contentHash);
+            log.info(
+                    "Transcript changed for mediaId={}, regenerating audio",
+                    request.mediaId()
+            );
+
+            return regenerate(
+                    audio,
+                    request,
+                    contentHash
+            );
         }
 
-        return generateNew(request, contentHash);
+        return generateNew(
+                request,
+                contentHash
+        );
     }
 
     private StoryAudioResponse generateNew(GenerateStoryAudioRequest request, String contentHash) {
         log.info("Generating story audio: mediaId={}, characters={}", request.mediaId(), request.transcript().length());
 
-        byte[] audioBytes = elevenLabsClient.synthesize(request.transcript());
+        TtsSynthesisResult result =
+                elevenLabsClient.synthesize(request.transcript());
         String fileName = request.mediaId() + "-" + contentHash.substring(0, 8) + ".mp3";
-        AudioFileStorageService.StoredFile stored = storageService.store(fileName, audioBytes);
+        AudioFileStorageService.StoredFile stored = storageService.store(fileName, result.audioBytes());
 
         StoryAudio audio = StoryAudio.builder()
                 .mediaId(request.mediaId())
@@ -106,6 +162,7 @@ public class StoryAudioService {
                 .characterCount(request.transcript().length())
                 .fileSize(stored.fileSize())
                 .contentHash(contentHash)
+                .wordTimings(result.wordTimings())
                 .build();
 
         StoryAudio saved = storyAudioRepository.save(audio);
@@ -113,9 +170,10 @@ public class StoryAudioService {
     }
 
     private StoryAudioResponse regenerate(StoryAudio existing, GenerateStoryAudioRequest request, String contentHash) {
-        byte[] audioBytes = elevenLabsClient.synthesize(request.transcript());
+        TtsSynthesisResult result =
+                elevenLabsClient.synthesize(request.transcript());
         String fileName = request.mediaId() + "-" + contentHash.substring(0, 8) + ".mp3";
-        AudioFileStorageService.StoredFile stored = storageService.store(fileName, audioBytes);
+        AudioFileStorageService.StoredFile stored = storageService.store(fileName, result.audioBytes());
 
         existing.setTitle(request.title());
         existing.setFileName(stored.fileName());
@@ -124,6 +182,7 @@ public class StoryAudioService {
         existing.setCharacterCount(request.transcript().length());
         existing.setFileSize(stored.fileSize());
         existing.setContentHash(contentHash);
+        existing.setWordTimings(result.wordTimings());
 
         StoryAudio saved = storyAudioRepository.save(existing);
         return StoryAudioResponse.from(saved);
