@@ -41,13 +41,13 @@ public class StoryAudio {
     @Column(nullable = false)
     private String title;
 
-    @Column(name = "file_name", nullable = false)
+    @Column(name = "file_name")
     private String fileName;
 
-    @Column(name = "file_path", nullable = false)
+    @Column(name = "file_path")
     private String filePath;
 
-    @Column(nullable = false)
+    @Column
     private String url;
 
     @Column(name = "voice_id")
