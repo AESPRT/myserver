@@ -79,6 +79,7 @@ public class StoryAudio {
             columnDefinition = "jsonb",
             nullable = false
     )
+    @Builder.Default
     private List<WordTiming> wordTimings = new ArrayList<>();
 
     @CreationTimestamp
