@@ -1,6 +1,7 @@
 package com.aedev.myserver.application.dto.audio;
 
 import com.aedev.myserver.domain.entity.StoryAudio;
+import com.aedev.myserver.domain.enums.StoryAudioStatus;
 
 import java.time.Instant;
 import java.util.List;
@@ -16,6 +17,8 @@ public record StoryAudioResponse(
         Integer characterCount,
         Long fileSize,
         Instant createdAt,
+        StoryAudioStatus status,
+        String errorMessage,
         List<WordTiming> words
 ) {
 
@@ -31,6 +34,8 @@ public record StoryAudioResponse(
                 audio.getCharacterCount(),
                 audio.getFileSize(),
                 audio.getCreatedAt(),
+                audio.getStatus(),
+                audio.getErrorMessage(),
                 audio.getWordTimings() != null
                         ? audio.getWordTimings()
                         : List.of()

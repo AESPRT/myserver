@@ -1,0 +1,5 @@
+ALTER TABLE story_audio
+ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'READY';
+
+ALTER TABLE story_audio
+ADD COLUMN error_message TEXT;

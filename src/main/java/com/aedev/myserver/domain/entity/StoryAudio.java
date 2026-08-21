@@ -1,6 +1,7 @@
 package com.aedev.myserver.domain.entity;
 
 import com.aedev.myserver.application.dto.audio.WordTiming;
+import com.aedev.myserver.domain.enums.StoryAudioStatus;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -63,6 +64,14 @@ public class StoryAudio {
 
     @Column(name = "content_hash")
     private String contentHash;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false)
+    @Builder.Default
+    private StoryAudioStatus status = StoryAudioStatus.PROCESSING;
+
+    @Column(name = "error_message")
+    private String errorMessage;
 
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(
