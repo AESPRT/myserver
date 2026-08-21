@@ -107,14 +107,14 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleDataIntegrityViolation(
             DataIntegrityViolationException e
     ) {
-        log.info(
-                "Data integrity violation, likely a concurrent duplicate webhook delivery: {}",
-                e.getMessage()
+        log.error(
+                "Database integrity constraint violation",
+                e
         );
 
         return respond(
-                HttpStatus.OK,
-                "duplicate event acknowledged"
+                HttpStatus.CONFLICT,
+                "Database constraint violation."
         );
     }
 
