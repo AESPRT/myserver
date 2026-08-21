@@ -387,7 +387,6 @@ public class StoryAudioService {
             GenerateStoryAudioRequest request,
             String contentHash
     ) {
-
         audio.setTitle(
                 request.title()
         );
@@ -415,17 +414,23 @@ public class StoryAudioService {
         audio.setErrorMessage(null);
 
         audio.setWordTimings(
-                List.of()
+                java.util.List.of()
         );
 
         /*
-         * These are cleared ONLY for a full TTS
-         * regeneration.
+         * IMPORTANT:
+         *
+         * DO NOT clear:
+         *
+         * fileName
+         * filePath
+         * url
+         * fileSize
+         *
+         * The database columns are NOT NULL and the old
+         * audio should remain available until the new one
+         * has successfully generated.
          */
-        audio.setUrl(null);
-        audio.setFileName(null);
-        audio.setFilePath(null);
-        audio.setFileSize(null);
     }
 
     private String sha256(
