@@ -13,6 +13,13 @@ public class ElevenLabsWebClientConfig {
                 .baseUrl(properties.apiUrl())
                 .defaultHeader("xi-api-key", properties.apiKey())
                 .defaultHeader("Content-Type", "application/json")
+                .codecs(configurer ->
+                        configurer
+                                .defaultCodecs()
+                                .maxInMemorySize(
+                                        100 * 1024 * 1024
+                                )
+                )
                 .build();
     }
 }

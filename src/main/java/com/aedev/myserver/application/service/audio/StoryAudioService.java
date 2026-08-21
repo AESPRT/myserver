@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -21,22 +22,29 @@ import java.util.concurrent.locks.ReentrantLock;
 @Service
 public class StoryAudioService {
 
-    private static final Logger log = LoggerFactory.getLogger(StoryAudioService.class);
+    private static final Logger log =
+            LoggerFactory.getLogger(
+                    StoryAudioService.class
+            );
 
     private final StoryAudioRepository storyAudioRepository;
     private final ElevenLabsProperties elevenLabsProperties;
     private final AudioFileStorageService storageService;
     private final StoryAudioGenerationService generationService;
 
-    // Per-mediaId in-process lock. This solves the "two concurrent
-    // requests for the same new mediaId both miss the DB check and both
-    // call ElevenLabs" race from section 10 of the plan -- but ONLY for a
-    // single backend instance. If this app is ever horizontally scaled to
-    // multiple instances, this map-based lock does nothing across
-    // processes and a distributed lock (DB advisory lock, Redis, etc.)
-    // would be needed instead. Flagging this now since it's an easy trap
-    // to hit later if the app scales without anyone remembering this.
-    private final ConcurrentHashMap<String, ReentrantLock> mediaLocks = new ConcurrentHashMap<>();
+    /**
+     * One in-process lock per mediaId.
+     * <p>
+     * Do NOT remove locks from this map immediately after
+     * unlocking; another thread may already be waiting on
+     * that same lock.
+     * <p>
+     * For multiple backend instances, replace this with
+     * a distributed/DB lock later.
+     */
+    private final ConcurrentHashMap<String, ReentrantLock>
+            mediaLocks =
+            new ConcurrentHashMap<>();
 
     public StoryAudioService(
             StoryAudioRepository storyAudioRepository,
@@ -44,22 +52,35 @@ public class StoryAudioService {
             AudioFileStorageService storageService,
             StoryAudioGenerationService generationService
     ) {
-        this.storyAudioRepository = storyAudioRepository;
-        this.elevenLabsProperties = elevenLabsProperties;
-        this.storageService = storageService;
-        this.generationService = generationService;
+        this.storyAudioRepository =
+                storyAudioRepository;
+
+        this.elevenLabsProperties =
+                elevenLabsProperties;
+
+        this.storageService =
+                storageService;
+
+        this.generationService =
+                generationService;
     }
 
-    public StoryAudioResponse generateOrGetAudio(GenerateStoryAudioRequest request) {
-        ReentrantLock lock = mediaLocks.computeIfAbsent(
-                request.mediaId(),
-                id -> new ReentrantLock()
-        );
+    public StoryAudioResponse generateOrGetAudio(
+            GenerateStoryAudioRequest request
+    ) {
+
+        ReentrantLock lock =
+                mediaLocks.computeIfAbsent(
+                        request.mediaId(),
+                        id -> new ReentrantLock()
+                );
 
         lock.lock();
 
         try {
-            return doGenerateOrGetAudio(request);
+            return doGenerateOrGetAudio(
+                    request
+            );
         } finally {
             lock.unlock();
         }
@@ -68,64 +89,189 @@ public class StoryAudioService {
     private StoryAudioResponse doGenerateOrGetAudio(
             GenerateStoryAudioRequest request
     ) {
-        String contentHash =
-                sha256(request.transcript());
 
-        Optional<StoryAudio> existing =
-                storyAudioRepository.findByMediaId(
-                        request.mediaId()
+        String contentHash =
+                sha256(
+                        request.transcript()
                 );
 
+        Optional<StoryAudio> existing =
+                storyAudioRepository
+                        .findByMediaId(
+                                request.mediaId()
+                        );
+
+        /*
+         * =================================================
+         * EXISTING DATABASE RECORD
+         * =================================================
+         */
         if (existing.isPresent()) {
-            StoryAudio audio = existing.get();
+
+            StoryAudio audio =
+                    existing.get();
 
             boolean sameContent =
                     contentHash.equals(
                             audio.getContentHash()
                     );
 
+            /*
+             * =================================================
+             * SAME TRANSCRIPT
+             * =================================================
+             */
             if (sameContent) {
 
+                boolean fileExists =
+                        audio.getFilePath() != null &&
+                                !audio.getFilePath().isBlank() &&
+                                storageService.exists(
+                                        audio.getFilePath()
+                                );
+
+                boolean hasWordTimings =
+                        audio.getWordTimings() != null &&
+                                !audio.getWordTimings().isEmpty();
+
+                /*
+                 * ---------------------------------------------
+                 * CASE 1
+                 *
+                 * Complete cache hit.
+                 *
+                 * MP3 exists.
+                 * Timings exist.
+                 *
+                 * Spend zero new generation work.
+                 * ---------------------------------------------
+                 */
+                if (
+                        audio.getStatus()
+                                == StoryAudioStatus.READY &&
+                                fileExists &&
+                                hasWordTimings
+                ) {
+
+                    log.info(
+                            "Story cache hit: mediaId={}, audioId={}, words={}",
+                            request.mediaId(),
+                            audio.getId(),
+                            audio.getWordTimings().size()
+                    );
+
+                    return StoryAudioResponse.from(
+                            audio
+                    );
+                }
+
+                /*
+                 * ---------------------------------------------
+                 * CASE 2
+                 *
+                 * A background job is already running.
+                 * ---------------------------------------------
+                 */
                 if (
                         audio.getStatus()
                                 == StoryAudioStatus.PROCESSING
                 ) {
-                    return StoryAudioResponse.from(audio);
-                }
 
-                if (
-                        audio.getStatus()
-                                == StoryAudioStatus.READY
-                ) {
-                    boolean fileExists =
-                            audio.getFilePath() != null &&
-                                    storageService.exists(
-                                            audio.getFilePath()
-                                    );
+                    log.info(
+                            "Story operation already processing: mediaId={}, audioId={}",
+                            request.mediaId(),
+                            audio.getId()
+                    );
 
-                    boolean hasWordTimings =
-                            audio.getWordTimings() != null &&
-                                    !audio.getWordTimings().isEmpty();
-
-                    if (fileExists && hasWordTimings) {
-                        return StoryAudioResponse.from(audio);
-                    }
+                    return StoryAudioResponse.from(
+                            audio
+                    );
                 }
 
                 /*
-                 * Existing legacy audio, FAILED generation,
-                 * missing file, or missing timestamp data.
+                 * ---------------------------------------------
+                 * CASE 3
                  *
-                 * Queue generation again.
+                 * MP3 EXISTS
+                 * WORDS MISSING
+                 *
+                 * DO NOT regenerate TTS.
+                 *
+                 * Run Forced Alignment on existing MP3 only.
+                 * ---------------------------------------------
                  */
-                prepareForGeneration(
+                if (
+                        fileExists &&
+                                !hasWordTimings
+                ) {
+
+                    log.info(
+                            "Existing MP3 has no word timings. Starting forced alignment only: mediaId={}, audioId={}, file={}",
+                            request.mediaId(),
+                            audio.getId(),
+                            audio.getFileName()
+                    );
+
+                    /*
+                     * IMPORTANT:
+                     *
+                     * Do NOT call prepareForFullGeneration().
+                     *
+                     * It would clear the existing MP3 fields.
+                     */
+                    audio.setStatus(
+                            StoryAudioStatus.PROCESSING
+                    );
+
+                    audio.setErrorMessage(null);
+
+                    StoryAudio saved =
+                            storyAudioRepository.save(
+                                    audio
+                            );
+
+                    generationService
+                            .generateWordTimingsOnly(
+                                    saved.getId(),
+                                    request.transcript(),
+                                    contentHash
+                            );
+
+                    /*
+                     * URL / fileName / filePath / fileSize
+                     * are still preserved.
+                     */
+                    return StoryAudioResponse.from(
+                            saved
+                    );
+                }
+
+                /*
+                 * ---------------------------------------------
+                 * CASE 4
+                 *
+                 * Transcript is unchanged,
+                 * but actual MP3 is missing.
+                 *
+                 * Full TTS generation is unavoidable.
+                 * ---------------------------------------------
+                 */
+                log.warn(
+                        "Story MP3 is missing. Full regeneration required: mediaId={}, audioId={}",
+                        request.mediaId(),
+                        audio.getId()
+                );
+
+                prepareForFullGeneration(
                         audio,
                         request,
                         contentHash
                 );
 
                 StoryAudio saved =
-                        storyAudioRepository.save(audio);
+                        storyAudioRepository.save(
+                                audio
+                        );
 
                 generationService.generate(
                         saved.getId(),
@@ -133,18 +279,37 @@ public class StoryAudioService {
                         contentHash
                 );
 
-                return StoryAudioResponse.from(saved);
+                return StoryAudioResponse.from(
+                        saved
+                );
             }
 
-            // Transcript changed.
-            prepareForGeneration(
+            /*
+             * =================================================
+             * TRANSCRIPT CHANGED
+             *
+             * Existing MP3 is no longer valid.
+             *
+             * Generate new audio + timestamps.
+             * =================================================
+             */
+
+            log.info(
+                    "Transcript changed. Full story regeneration required: mediaId={}, audioId={}",
+                    request.mediaId(),
+                    audio.getId()
+            );
+
+            prepareForFullGeneration(
                     audio,
                     request,
                     contentHash
             );
 
             StoryAudio saved =
-                    storyAudioRepository.save(audio);
+                    storyAudioRepository.save(
+                            audio
+                    );
 
             generationService.generate(
                     saved.getId(),
@@ -152,23 +317,54 @@ public class StoryAudioService {
                     contentHash
             );
 
-            return StoryAudioResponse.from(saved);
+            return StoryAudioResponse.from(
+                    saved
+            );
         }
 
-        StoryAudio audio = StoryAudio.builder()
-                .mediaId(request.mediaId())
-                .title(request.title())
-                .voiceId(elevenLabsProperties.voiceId())
-                .modelId(elevenLabsProperties.modelId())
-                .characterCount(
-                        request.transcript().length()
-                )
-                .contentHash(contentHash)
-                .status(StoryAudioStatus.PROCESSING)
-                .build();
+        /*
+         * =================================================
+         * BRAND-NEW STORY
+         * =================================================
+         */
+
+        log.info(
+                "Creating new story generation record: mediaId={}",
+                request.mediaId()
+        );
+
+        StoryAudio audio =
+                StoryAudio.builder()
+                        .mediaId(
+                                request.mediaId()
+                        )
+                        .title(
+                                request.title()
+                        )
+                        .voiceId(
+                                elevenLabsProperties.voiceId()
+                        )
+                        .modelId(
+                                elevenLabsProperties.modelId()
+                        )
+                        .characterCount(
+                                request.transcript().length()
+                        )
+                        .contentHash(
+                                contentHash
+                        )
+                        .status(
+                                StoryAudioStatus.PROCESSING
+                        )
+                        .wordTimings(
+                                List.of()
+                        )
+                        .build();
 
         StoryAudio saved =
-                storyAudioRepository.save(audio);
+                storyAudioRepository.save(
+                        audio
+                );
 
         generationService.generate(
                 saved.getId(),
@@ -176,15 +372,25 @@ public class StoryAudioService {
                 contentHash
         );
 
-        return StoryAudioResponse.from(saved);
+        return StoryAudioResponse.from(
+                saved
+        );
     }
 
-    private void prepareForGeneration(
+    /**
+     * ONLY use this when a new MP3 must actually be generated.
+     * <p>
+     * This intentionally clears the previous audio output.
+     */
+    private void prepareForFullGeneration(
             StoryAudio audio,
             GenerateStoryAudioRequest request,
             String contentHash
     ) {
-        audio.setTitle(request.title());
+
+        audio.setTitle(
+                request.title()
+        );
 
         audio.setVoiceId(
                 elevenLabsProperties.voiceId()
@@ -198,7 +404,9 @@ public class StoryAudioService {
                 request.transcript().length()
         );
 
-        audio.setContentHash(contentHash);
+        audio.setContentHash(
+                contentHash
+        );
 
         audio.setStatus(
                 StoryAudioStatus.PROCESSING
@@ -207,39 +415,69 @@ public class StoryAudioService {
         audio.setErrorMessage(null);
 
         audio.setWordTimings(
-                java.util.List.of()
+                List.of()
         );
 
-        // Clear stale generated output
+        /*
+         * These are cleared ONLY for a full TTS
+         * regeneration.
+         */
         audio.setUrl(null);
         audio.setFileName(null);
         audio.setFilePath(null);
         audio.setFileSize(null);
     }
 
-    private String sha256(String input) {
+    private String sha256(
+            String input
+    ) {
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(input.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
+
+            MessageDigest digest =
+                    MessageDigest.getInstance(
+                            "SHA-256"
+                    );
+
+            byte[] hash =
+                    digest.digest(
+                            input.getBytes(
+                                    StandardCharsets.UTF_8
+                            )
+                    );
+
+            return HexFormat.of()
+                    .formatHex(
+                            hash
+                    );
+
         } catch (Exception e) {
-            throw new IllegalStateException("Failed to hash transcript", e);
+
+            throw new IllegalStateException(
+                    "Failed to hash transcript",
+                    e
+            );
         }
     }
 
     public StoryAudioResponse getByMediaId(
             String mediaId
     ) {
+
         StoryAudio audio =
                 storyAudioRepository
-                        .findByMediaId(mediaId)
+                        .findByMediaId(
+                                mediaId
+                        )
                         .orElseThrow(
-                                () -> new IllegalArgumentException(
-                                        "Story audio not found: "
-                                                + mediaId
-                                )
+                                () ->
+                                        new IllegalArgumentException(
+                                                "Story audio not found: "
+                                                        + mediaId
+                                        )
                         );
 
-        return StoryAudioResponse.from(audio);
+        return StoryAudioResponse.from(
+                audio
+        );
     }
 }

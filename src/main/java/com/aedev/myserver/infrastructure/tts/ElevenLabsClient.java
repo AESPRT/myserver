@@ -2,11 +2,16 @@ package com.aedev.myserver.infrastructure.tts;
 
 import com.aedev.myserver.application.dto.audio.WordTiming;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.MultipartBodyBuilder;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -26,24 +31,33 @@ public class ElevenLabsClient {
         this.properties = properties;
     }
 
+    /**
+     * Generate completely new speech AND obtain timing metadata.
+     * <p>
+     * Use this only when:
+     * - audio does not exist, or
+     * - transcript has changed.
+     */
     public TtsSynthesisResult synthesize(String transcript) {
         try {
-            ElevenLabsTtsResponse response = elevenLabsWebClient.post()
-                    .uri(
-                            "/v1/text-to-speech/{voiceId}/with-timestamps",
-                            properties.voiceId()
-                    )
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .accept(MediaType.APPLICATION_JSON)
-                    .bodyValue(
-                            new TtsRequestBody(
-                                    transcript,
-                                    properties.modelId()
+
+            ElevenLabsTtsResponse response =
+                    elevenLabsWebClient.post()
+                            .uri(
+                                    "/v1/text-to-speech/{voiceId}/with-timestamps",
+                                    properties.voiceId()
                             )
-                    )
-                    .retrieve()
-                    .bodyToMono(ElevenLabsTtsResponse.class)
-                    .block();
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.APPLICATION_JSON)
+                            .bodyValue(
+                                    new TtsRequestBody(
+                                            transcript,
+                                            properties.modelId()
+                                    )
+                            )
+                            .retrieve()
+                            .bodyToMono(ElevenLabsTtsResponse.class)
+                            .block();
 
             if (response == null) {
                 throw new IllegalStateException(
@@ -60,17 +74,28 @@ public class ElevenLabsClient {
                 );
             }
 
-            byte[] audioBytes = Base64.getDecoder()
-                    .decode(response.audioBase64());
+            byte[] audioBytes;
+
+            try {
+                audioBytes = Base64.getDecoder()
+                        .decode(response.audioBase64());
+            } catch (IllegalArgumentException e) {
+                throw new IllegalStateException(
+                        "Failed to decode ElevenLabs audio",
+                        e
+                );
+            }
 
             /*
-             * Use alignment rather than normalizedAlignment.
+             * alignment corresponds to the original transcript.
              *
-             * alignment corresponds to the original supplied transcript,
-             * which is what the Android UI will display.
+             * That is preferable for the Android UI because Android
+             * displays the original transcript.
              */
             List<WordTiming> wordTimings =
-                    extractWordTimings(response.alignment());
+                    extractWordTimings(
+                            response.alignment()
+                    );
 
             return new TtsSynthesisResult(
                     audioBytes,
@@ -88,23 +113,150 @@ public class ElevenLabsClient {
         } catch (WebClientResponseException e) {
 
             throw new ElevenLabsIntegrationException(
-                    "ElevenLabs request failed: "
-                            + e.getStatusCode()
-                            + " "
-                            + e.getStatusText(),
+                    buildElevenLabsErrorMessage(e),
                     e.getStatusCode(),
-                    e
-            );
-
-        } catch (IllegalArgumentException e) {
-
-            throw new IllegalStateException(
-                    "Failed to decode ElevenLabs audio",
                     e
             );
         }
     }
 
+    /**
+     * Generate ONLY word timing metadata for an already-generated MP3.
+     * <p>
+     * This does NOT regenerate the TTS audio.
+     * <p>
+     * Existing audio:
+     * <p>
+     * MP3 + transcript
+     *       ↓
+     * ElevenLabs Forced Alignment
+     *       ↓
+     * WordTiming[]
+     */
+    public List<WordTiming> alignExistingAudio(
+            String filePath,
+            String transcript
+    ) {
+        try {
+
+            if (filePath == null || filePath.isBlank()) {
+                throw new IllegalArgumentException(
+                        "Audio file path cannot be empty"
+                );
+            }
+
+            if (transcript == null || transcript.isBlank()) {
+                throw new IllegalArgumentException(
+                        "Transcript cannot be empty"
+                );
+            }
+
+            Path path = Path.of(filePath);
+
+            if (!Files.exists(path)) {
+                throw new IllegalStateException(
+                        "Audio file does not exist: " + filePath
+                );
+            }
+
+            if (!Files.isRegularFile(path)) {
+                throw new IllegalStateException(
+                        "Audio path is not a file: " + filePath
+                );
+            }
+
+            MultipartBodyBuilder multipart =
+                    new MultipartBodyBuilder();
+
+            multipart.part(
+                    "file",
+                    new FileSystemResource(path)
+            );
+
+            multipart.part(
+                    "text",
+                    transcript
+            );
+
+            ForcedAlignmentResponse response =
+                    elevenLabsWebClient.post()
+                            .uri("/v1/forced-alignment")
+                            .contentType(
+                                    MediaType.MULTIPART_FORM_DATA
+                            )
+                            .accept(
+                                    MediaType.APPLICATION_JSON
+                            )
+                            .body(
+                                    BodyInserters.fromMultipartData(
+                                            multipart.build()
+                                    )
+                            )
+                            .retrieve()
+                            .bodyToMono(
+                                    ForcedAlignmentResponse.class
+                            )
+                            .block();
+
+            if (response == null) {
+                throw new IllegalStateException(
+                        "ElevenLabs forced alignment returned an empty response"
+                );
+            }
+
+            if (
+                    response.words() == null ||
+                            response.words().isEmpty()
+            ) {
+                throw new IllegalStateException(
+                        "ElevenLabs forced alignment returned no word timings"
+                );
+            }
+
+            return response.words()
+                    .stream()
+                    .filter(word ->
+                            word != null &&
+                                    word.text() != null &&
+                                    !word.text().isBlank() &&
+                                    word.start() != null &&
+                                    word.end() != null
+                    )
+                    .map(word ->
+                            new WordTiming(
+                                    word.text(),
+                                    secondsToMillis(
+                                            word.start()
+                                    ),
+                                    secondsToMillis(
+                                            word.end()
+                                    )
+                            )
+                    )
+                    .toList();
+
+        } catch (WebClientResponseException.TooManyRequests e) {
+
+            throw new ElevenLabsIntegrationException(
+                    "ElevenLabs forced alignment rate limit exceeded",
+                    e.getStatusCode(),
+                    e
+            );
+
+        } catch (WebClientResponseException e) {
+
+            throw new ElevenLabsIntegrationException(
+                    buildElevenLabsErrorMessage(e),
+                    e.getStatusCode(),
+                    e
+            );
+        }
+    }
+
+    /**
+     * Convert character-level timestamps returned by
+     * /with-timestamps into word-level timestamps.
+     */
     private List<WordTiming> extractWordTimings(
             ElevenLabsTtsResponse.Alignment alignment
     ) {
@@ -112,9 +264,12 @@ public class ElevenLabsClient {
             return List.of();
         }
 
-        List<String> characters = alignment.characters();
+        List<String> characters =
+                alignment.characters();
+
         List<Double> starts =
                 alignment.characterStartTimesSeconds();
+
         List<Double> ends =
                 alignment.characterEndTimesSeconds();
 
@@ -129,28 +284,52 @@ public class ElevenLabsClient {
 
         int count = Math.min(
                 characters.size(),
-                Math.min(starts.size(), ends.size())
+                Math.min(
+                        starts.size(),
+                        ends.size()
+                )
         );
 
-        List<WordTiming> words = new ArrayList<>();
+        List<WordTiming> words =
+                new ArrayList<>();
 
-        StringBuilder currentWord = new StringBuilder();
+        StringBuilder currentWord =
+                new StringBuilder();
 
         Double wordStartSeconds = null;
         Double wordEndSeconds = null;
 
         for (int i = 0; i < count; i++) {
-            String character = characters.get(i);
 
-            if (character == null || character.isEmpty()) {
+            String character =
+                    characters.get(i);
+
+            if (
+                    character == null ||
+                            character.isEmpty()
+            ) {
                 continue;
             }
 
-            double startSeconds = starts.get(i);
-            double endSeconds = ends.get(i);
+            Double startSeconds =
+                    starts.get(i);
+
+            Double endSeconds =
+                    ends.get(i);
+
+            if (
+                    startSeconds == null ||
+                            endSeconds == null
+            ) {
+                continue;
+            }
 
             boolean whitespace =
-                    character.chars().allMatch(Character::isWhitespace);
+                    character
+                            .chars()
+                            .allMatch(
+                                    Character::isWhitespace
+                            );
 
             if (whitespace) {
 
@@ -162,6 +341,7 @@ public class ElevenLabsClient {
                 );
 
                 currentWord.setLength(0);
+
                 wordStartSeconds = null;
                 wordEndSeconds = null;
 
@@ -169,14 +349,17 @@ public class ElevenLabsClient {
             }
 
             if (currentWord.isEmpty()) {
-                wordStartSeconds = startSeconds;
+                wordStartSeconds =
+                        startSeconds;
             }
 
             currentWord.append(character);
-            wordEndSeconds = endSeconds;
+
+            wordEndSeconds =
+                    endSeconds;
         }
 
-        // Flush final word.
+        // Flush final word
         addWord(
                 words,
                 currentWord,
@@ -204,14 +387,43 @@ public class ElevenLabsClient {
         words.add(
                 new WordTiming(
                         text.toString(),
-                        secondsToMillis(startSeconds),
-                        secondsToMillis(endSeconds)
+                        secondsToMillis(
+                                startSeconds
+                        ),
+                        secondsToMillis(
+                                endSeconds
+                        )
                 )
         );
     }
 
-    private long secondsToMillis(double seconds) {
-        return Math.round(seconds * 1000.0);
+    private long secondsToMillis(
+            double seconds
+    ) {
+        return Math.round(
+                seconds * 1000.0
+        );
+    }
+
+    private String buildElevenLabsErrorMessage(
+            WebClientResponseException e
+    ) {
+        String body =
+                e.getResponseBodyAsString();
+
+        if (
+                !body.isBlank()
+        ) {
+            return "ElevenLabs request failed: "
+                    + e.getStatusCode()
+                    + " - "
+                    + body;
+        }
+
+        return "ElevenLabs request failed: "
+                + e.getStatusCode()
+                + " "
+                + e.getStatusText();
     }
 
     private record TtsRequestBody(
